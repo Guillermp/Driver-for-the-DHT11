@@ -90,7 +90,9 @@ class ComPin {
 };
 
 struct Clock {
+    virtual ~Clock() = default;
     virtual std::uint32_t now_us() const = 0;
+    virtual void delay_us(std::uint32_t duration) const = 0;
 };
 
 // Hardware mocked ComPin and Clock
@@ -126,9 +128,18 @@ class MocKComPin : public ComPin {
 
 };
 
+enum ComStage {
+    comBegin,
+    comData,
+
+};
+
 class MockClock : public Clock {
     public:
-        std::uint32_t now_us() const override {
+        MockClock(MocKComPin & pin, const ComStage comStage) : pin_(pin), comStage_(comStage){}
+        std::uint32_t now_us()const override {
+            scheduled_sensor_sequence();
+            time_us_++;
             return time_us_;
             }   
         
@@ -136,31 +147,79 @@ class MockClock : public Clock {
             time_us_ += duration;
         }
 
-        void delay_us(std::uint32_t duration) {
+        void delay_us(std::uint32_t duration) const override {
             std::uint32_t start = now_us();
-            std::uint32_t now = now_us();
+            std::uint32_t now = start;
             while (!elapsed_at_least(now, start, duration)) {
-                advance_us(1);
                 now = now_us();
 
-    }
+            }
 
-}
+        }
 
     private:
-        std::uint32_t time_us_{};
+        mutable std::uint32_t time_us_{};
+        MocKComPin & pin_;
+        const ComStage comStage_;
+        
 
+        void scheduled_sensor_sequence() const { // Scheduled sensor response
+            if (comStage_ == ComStage::comBegin) {
+                switch (time_us_)
+                {
+                case 18020:
+                    pin_.sensor_drive_low();
+                    break;
+                case 18100:
+                    pin_.sensor_release();
+                    break;
+                case 18180:
+                    pin_.sensor_drive_low();
+                    
+                default:
+                    break;
+                }
+            }
+
+            if (comStage_ == ComStage::comData) { // Simulation of transferring all ones
+                switch (time_us_)
+                {
+                case 0:
+                    pin_.sensor_drive_low();
+                    break;
+                case 50+2:
+                    pin_.sensor_release();
+                    break;
+                case 70+50+2: 
+                    pin_.sensor_drive_low();
+                    break;
+                
+                case 130:
+                    time_us_ = 0; //Reset the time so if I transfer more bits it still works
+                    break;
+                    
+                
+                default:
+                    break;
+                }
+
+            }
+
+        }
 
 };
 
+enum PinLevel {
+    low,
+    high,
+};
 
-bool fake_wait_for_level(const bool level, const std::uint32_t timeout, MockClock & clock, MocKComPin & pin) {
+bool wait_for_level(const bool level, const std::uint32_t timeout, Clock & clock, ComPin & pin) {
 
     std::uint32_t start = clock.now_us();
-    std::uint32_t now = clock.now_us();
+    std::uint32_t now = start;
     while (!elapsed_at_least(now, start, timeout)) {
         if (pin.is_high() == level) return true;
-        clock.advance_us(1);
         now = clock.now_us();
     } 
 
@@ -169,11 +228,10 @@ bool fake_wait_for_level(const bool level, const std::uint32_t timeout, MockCloc
 }
 
 
-
 // Communication ---------------------------------------------------------------------------------------
 
 // Startup
-bool fake_com_begin(MocKComPin & pin, MockClock & clock) {
+bool com_begin(ComPin & pin, Clock & clock) {
     // Send start signal to the sensor
     pin.drive_low();
     clock.delay_us(18000);
@@ -181,21 +239,39 @@ bool fake_com_begin(MocKComPin & pin, MockClock & clock) {
 
     // Wait for sensor response
     uint32_t timeout = 50; // Typical waiting time 20us-40us
-    pin.sensor_drive_low();
-    clock.advance_us(20);
-    if(!fake_wait_for_level(false, timeout, clock, pin)) return false; // Pin low
-    clock.advance_us(80);
+    if(!wait_for_level(PinLevel::low, timeout, clock, pin)) return false; // Pin low
 
     timeout = 90; // typically response of 80us
-    pin.sensor_release();
-    if(!fake_wait_for_level(true, timeout, clock, pin)) return false; // Pin high
-    clock.advance_us(80);
+    if(!wait_for_level(PinLevel::high, timeout, clock, pin)) return false; // Pin high
 
-    return true;
+    return wait_for_level(PinLevel::low, timeout, clock, pin);
 }
 
 
+struct PulseDurationResult {
+    bool timeout{};
+    std::array<std::uint8_t, 40> pulse_durations_us{};
+};
 
+PulseDurationResult fake_read_pulse_durations_data(MocKComPin & pin, MockClock & clock) {
+    std::array<std::uint8_t, 40> pulse_durations_us{};
+
+    for (unsigned int i{}; i < 40; i++) {
+        pin.sensor_drive_low();
+        clock.advance_us(50);
+        pin.sensor_release();
+        if(!wait_for_level(PinLevel::high, 80, clock, pin)) return {true, {}}; // Pin high
+        std::uint32_t pulseStart = clock.now_us();
+        clock.advance_us(70);
+        pin.sensor_drive_low();
+        if(!wait_for_level(PinLevel::low, 80, clock, pin)) return {true, {}}; // Pin low
+        std::uint32_t pulseEnd = clock.now_us();
+        pulse_durations_us[i] = static_cast<std::uint8_t>(pulseEnd - pulseStart);
+    }
+
+    return {false, pulse_durations_us};
+    
+}
 
 
 
@@ -245,31 +321,33 @@ int main() {
     pin.sensor_release();
     assert(pin.is_high());             // Both released again.
 
-    MockClock clock;
+    MockClock clock(pin, ComStage::comBegin);
     const auto start = clock.now_us();
     clock.advance_us(70);
 
-    assert(clock.now_us() - start == 70);
-    clock.delay_us(70);
-    assert(clock.now_us() - start == 140);
+    assert(clock.now_us() - start == 71);
 
 
-
-    assert(fake_com_begin(pin, clock));
+    MockClock clock2(pin, ComStage::comBegin);
+    assert(com_begin(pin, clock2));
 
 
     pin.release();
     pin.sensor_release();
     uint32_t timeout = 50; // Typical waiting time 20us-40us
-    assert(!fake_wait_for_level(false, timeout, clock, pin)); // Timeout happens
+    assert(!wait_for_level(PinLevel::low, timeout, clock, pin)); // Timeout happens
 
     pin.release();
     pin.sensor_drive_low();
     timeout = 50; // Typical waiting time 20us-40us
-    assert(fake_wait_for_level(false, timeout, clock, pin)); //Timeout does not happen
+    assert(wait_for_level(PinLevel::low, timeout, clock, pin)); //Timeout does not happen
+
+    PulseDurationResult durationsframe = fake_read_pulse_durations_data(pin, clock);
+    assert(durationsframe.timeout == false);
+    DecodeResult result_decode = decode_frame(durationsframe.pulse_durations_us);
+    assert(result_decode.error == DecodeError::checksum_mismatch);
+    assert((result_decode.frame == Frame{0, 0, 0, 0, 0}));
     
-
-
 
 
     return 0;
