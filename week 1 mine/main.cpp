@@ -61,7 +61,7 @@ DecodeResult decode_frame(const std::array<std::uint8_t, 40> & durations_us){
     }
 
     // Check if the frame is valid
-    if (!checksum_valid(frame)) return {{}, DecodeError::checksum_mismatch};
+    if (!checksum_valid(frame)) return {frame, DecodeError::checksum_mismatch};
 
     return {frame, DecodeError::none};
 
@@ -182,27 +182,22 @@ class MockClock : public Clock {
             }
 
             if (comStage_ == ComStage::comData) { // Simulation of transferring all ones
-                switch (time_us_)
-                {
+                // Inside the comData branch:
+                const auto position = time_us_ % 120U;
+
+                switch (position) {
                 case 0:
                     pin_.sensor_drive_low();
                     break;
-                case 50+2:
+
+                case 50:
                     pin_.sensor_release();
                     break;
-                case 70+50+2: 
-                    pin_.sensor_drive_low();
-                    break;
-                
-                case 130:
-                    time_us_ = 0; //Reset the time so if I transfer more bits it still works
-                    break;
-                    
-                
+
                 default:
                     break;
                 }
-
+                
             }
 
         }
@@ -253,17 +248,12 @@ struct PulseDurationResult {
     std::array<std::uint8_t, 40> pulse_durations_us{};
 };
 
-PulseDurationResult fake_read_pulse_durations_data(MocKComPin & pin, MockClock & clock) {
+PulseDurationResult read_pulse_durations_data(ComPin & pin, Clock & clock) {
     std::array<std::uint8_t, 40> pulse_durations_us{};
 
     for (unsigned int i{}; i < 40; i++) {
-        pin.sensor_drive_low();
-        clock.advance_us(50);
-        pin.sensor_release();
         if(!wait_for_level(PinLevel::high, 80, clock, pin)) return {true, {}}; // Pin high
         std::uint32_t pulseStart = clock.now_us();
-        clock.advance_us(70);
-        pin.sensor_drive_low();
         if(!wait_for_level(PinLevel::low, 80, clock, pin)) return {true, {}}; // Pin low
         std::uint32_t pulseEnd = clock.now_us();
         pulse_durations_us[i] = static_cast<std::uint8_t>(pulseEnd - pulseStart);
@@ -342,11 +332,12 @@ int main() {
     timeout = 50; // Typical waiting time 20us-40us
     assert(wait_for_level(PinLevel::low, timeout, clock, pin)); //Timeout does not happen
 
-    PulseDurationResult durationsframe = fake_read_pulse_durations_data(pin, clock);
+    MockClock clock3(pin, ComStage::comData);
+    PulseDurationResult durationsframe = read_pulse_durations_data(pin, clock3);
     assert(durationsframe.timeout == false);
     DecodeResult result_decode = decode_frame(durationsframe.pulse_durations_us);
     assert(result_decode.error == DecodeError::checksum_mismatch);
-    assert((result_decode.frame == Frame{0, 0, 0, 0, 0}));
+    assert((result_decode.frame == Frame{255, 255, 255, 255, 255}));
     
 
 
