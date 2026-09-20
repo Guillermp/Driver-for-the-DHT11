@@ -73,6 +73,20 @@ bool elapsed_at_least(std::uint32_t now,
     return static_cast<std::uint32_t>(now - start) >= interval_us;
 }
 
+struct sensorOutput
+{
+    double RH;
+    double Temperature;
+};
+
+
+sensorOutput frame2data(const Frame & frame){
+    double RHdecimal = frame[1]/10.0;
+    double Tdecimal = frame[3]/10.0;
+    return {frame[0]+RHdecimal, frame[2]+Tdecimal};
+
+}
+
 
 // Board adapter -- to communicate on the 1-wire
 
@@ -262,7 +276,6 @@ PulseDurationResult read_pulse_durations_data(ComPin & pin, Clock & clock) {
     return {false, pulse_durations_us};
     
 }
-
 
 
 int main() {
