@@ -3,9 +3,7 @@
 #include <array>
 #include <algorithm>
 #include <optional>
-
-// Just for development
-#include <iostream>
+#include <Arduino.h>
 
 using Frame = std::array<std::uint8_t, 5>;
 
@@ -27,7 +25,7 @@ std::optional<std::uint8_t> decode_byte(const std::array<std::uint8_t, 8> durati
     for (std::uint8_t duration : durations_us) {
         std::uint8_t bit{};
         if (duration >= 60 && duration < 80) bit = 1;
-        else if (duration >= 23 && duration <=28) bit = 0;
+        else if (duration >= 23 && duration <=28) bit = 0; // 26-28us
         else return std::nullopt;
         byte = static_cast<std::uint8_t>((byte << 1U) | bit);
     }
@@ -72,26 +70,23 @@ DecodeResult decode_frame(const std::array<std::uint8_t, 40> & durations_us){
 
 }
 
-bool elapsed_at_least(std::uint32_t now,
-                                std::uint32_t start,
-                                std::uint32_t interval_us) noexcept {
-    return static_cast<std::uint32_t>(now - start) >= interval_us;
-}
-
-struct sensorOutput
-{
+struct sensorOutput {
     double RH;
     double Temperature;
 };
 
-
-sensorOutput frame2measurement(const Frame & frame){
+sensorOutput frame2data(const Frame & frame){
     double RHdecimal = frame[1]/10.0;
     double Tdecimal = frame[3]/10.0;
     return {frame[0]+RHdecimal, frame[2]+Tdecimal};
 
 }
 
+bool elapsed_at_least(std::uint32_t now,
+                                std::uint32_t start,
+                                std::uint32_t interval_us) noexcept {
+    return static_cast<std::uint32_t>(now - start) >= interval_us;
+}
 
 // Board adapter -- to communicate on the 1-wire
 
@@ -108,11 +103,28 @@ class ComPin {
 
 };
 
-struct Clock {
-    virtual ~Clock() = default;
-    virtual std::uint32_t now_us() const = 0;
-    virtual void delay_us(std::uint32_t duration) const = 0;
-};
+// ESP32 pin
+class ESP32ComPin : public ComPin {
+    public:
+        ESP32ComPin(const int pin) : pin_(pin) {}
+        void drive_low() override {
+            digitalWrite(pin_, LOW);
+            pinMode(pin_, OUTPUT);
+        }
+
+        void release() override {
+            pinMode(pin_, INPUT);
+        }
+
+        bool is_high() const override {
+            return digitalRead(pin_) == HIGH;
+        }
+    private:
+        const int pin_;
+
+};  
+
+
 
 // Hardware mocked ComPin and Clock
 
@@ -153,6 +165,26 @@ enum ComStage {
 
 };
 
+struct Clock {
+    virtual ~Clock() = default;
+    virtual std::uint32_t now_us() const = 0;
+    virtual void delay_us(std::uint32_t duration) const = 0;
+};
+
+// ESP32
+class ESP32Clock : public Clock {
+    std::uint32_t now_us() const override {
+        return micros();
+    }
+
+    void delay_us(std::uint32_t duration) const override {
+        delayMicroseconds(duration);
+    }
+
+};
+
+// Mock clock
+
 class MockClock : public Clock {
     public:
         MockClock(MocKComPin & pin, const ComStage comStage) : pin_(pin), comStage_(comStage){}
@@ -180,9 +212,6 @@ class MockClock : public Clock {
         mutable std::uint32_t time_us_{};
         MocKComPin & pin_;
         const ComStage comStage_;
-        mutable unsigned int n_bits_sent_in_byte{1};
-        mutable unsigned int n_bytes{1};
-        mutable std::uint32_t bit_start_us_{};
         
 
         void scheduled_sensor_sequence() const { // Scheduled sensor response
@@ -204,36 +233,22 @@ class MockClock : public Clock {
             }
 
             if (comStage_ == ComStage::comData) { // Simulation of transferring all ones
-                const std::uint32_t elapsed = time_us_ - bit_start_us_;
+                // Inside the comData branch:
+                const auto position = time_us_ % 120U;
 
-                // After 40 bits, hold low for 50 us, then release.
-                if (n_bytes > 5) {
-                    if (elapsed >= 50U) {
-                        pin_.sensor_release();
-                    }
-                    return;
-                }
-
-                const bool decimal_byte = (n_bytes == 2 || n_bytes == 4);
-                const std::uint32_t high_duration = decimal_byte ? 27U : 70U; // For the decimal bytes I choose a zero bit
-
-                // Write the bit
-                if (elapsed == 0U) {
+                switch (position) {
+                case 0:
                     pin_.sensor_drive_low();
-                } else if (elapsed == 50U) {
+                    break;
+
+                case 50:
                     pin_.sensor_release();
-                } else if (elapsed == 50U + high_duration) {
-                    // Finish this bit and begin the next bit's low phase.
-                    pin_.sensor_drive_low();
-                    bit_start_us_ = time_us_;
+                    break;
 
-                    ++n_bits_sent_in_byte;
-                    if (n_bits_sent_in_byte > 8U) {
-                        n_bits_sent_in_byte = 1;
-                        ++n_bytes;
-                    }
+                default:
+                    break;
                 }
-
+                
             }
 
         }
@@ -269,15 +284,16 @@ bool com_begin(ComPin & pin, Clock & clock) {
     pin.release();
 
     // Wait for sensor response
-    uint32_t timeout = 50; // Typical waiting time 20us-40us
+    uint32_t timeout = 60; // Typical waiting time 20us-40us
     if(!wait_for_level(PinLevel::low, timeout, clock, pin)) return false; // Pin low
 
-    timeout = 90; // typically response of 80us
+    timeout = 100; // typically response of 80us
     if(!wait_for_level(PinLevel::high, timeout, clock, pin)) return false; // Pin high
 
     return wait_for_level(PinLevel::low, timeout, clock, pin);
 }
 
+// Data gathering stage
 
 struct PulseDurationResult {
     bool timeout{};
@@ -288,9 +304,9 @@ PulseDurationResult read_pulse_durations_data(ComPin & pin, Clock & clock) {
     std::array<std::uint8_t, 40> pulse_durations_us{};
 
     for (unsigned int i{}; i < 40; i++) {
-        if(!wait_for_level(PinLevel::high, 80, clock, pin)) return {true, {}}; // Pin high
+        if(!wait_for_level(PinLevel::high, 90, clock, pin)) return {true, {}}; // Pin high
         std::uint32_t pulseStart = clock.now_us();
-        if(!wait_for_level(PinLevel::low, 80, clock, pin)) return {true, {}}; // Pin low
+        if(!wait_for_level(PinLevel::low, 90, clock, pin)) return {true, {}}; // Pin low
         std::uint32_t pulseEnd = clock.now_us();
         pulse_durations_us[i] = static_cast<std::uint8_t>(pulseEnd - pulseStart);
     }
@@ -299,90 +315,80 @@ PulseDurationResult read_pulse_durations_data(ComPin & pin, Clock & clock) {
     
 }
 
+// Function to get data ------------------------------------------------------
+sensorOutput get_sensor_reading(ComPin & pin, Clock & clock, bool verbose) {
 
-int main() {
-    
-    assert(checksum_valid(Frame{60, 0, 23, 0, 83}));
-    assert(checksum_valid(Frame{60, 0, 24, 0, 84}));
-    assert(decode_byte({25U, 70U, 26U, 0U, 9U, 8U , 9U , 6U})== std::nullopt);
+    if (!com_begin(pin, clock)) {
+        if (verbose) Serial.println("Handshake timeout");
+        return {0, 0};
+    }
 
-    assert(decode_byte({75U, 76U, 78U, 79U, 75U, 76U , 76U , 76U}).value() == static_cast<std::uint8_t>(0xFF));
-    assert(decode_byte({70U, 28U, 27U, 26U, 26U, 26U , 26U , 26U}).value() == static_cast<std::uint8_t>(0x80));
-    assert(decode_byte({27U, 26U, 28U, 28U, 27U, 26U , 26U , 76U}).value() == static_cast<std::uint8_t>(0x01));
+    PulseDurationResult durationsframe = read_pulse_durations_data(pin, clock);
 
-    // Full frame test: Frame{60, 0, 23, 0, 83}
-    const std::array<std::uint8_t, 40> durations_us_frame{
-        27, 27, 70, 70, 70, 70, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 70, 27, 70, 70, 70, 27, 27, 27, 27, 27, 27, 27, 27, 27, 70, 27, 70, 27, 27, 70, 70  // 60 = 00111100
-    };
+    if (durationsframe.timeout) {
+        if (verbose) Serial.println("Timeout happened reading data");
+        return {0,0};
+    }
 
-    assert((decode_frame(durations_us_frame).frame == Frame{60, 0, 23, 0, 83}));
-
-    const auto result = decode_frame(durations_us_frame);
-    assert(result.error == DecodeError::none);
-    assert((result.frame == Frame{60, 0, 23, 0, 83}));
-
-    auto invalid_pulse = durations_us_frame;
-    invalid_pulse[10] = 45;
-    assert(decode_frame(invalid_pulse).error == DecodeError::invalid_pulse);
-
-    auto bad_checksum = durations_us_frame;
-    bad_checksum[39] = 27; // Changes checksum byte from 83 to 82.
-    assert(decode_frame(bad_checksum).error == DecodeError::checksum_mismatch);
-
-
-    // Testing the mock hardware 
-
-    MocKComPin pin;
-
-    assert(pin.is_high());             // Both devices released.
-
-    pin.drive_low();
-    assert(!pin.is_high());            // MCU holds the line low.
-
-    pin.sensor_drive_low();
-    pin.release();
-    assert(!pin.is_high());            // Sensor still holds it low.
-
-    pin.sensor_release();
-    assert(pin.is_high());             // Both released again.
-
-    MockClock clock(pin, ComStage::comBegin);
-    const auto start = clock.now_us();
-    clock.advance_us(70);
-
-    assert(clock.now_us() - start == 71);
-
-
-    MockClock clock2(pin, ComStage::comBegin);
-    assert(com_begin(pin, clock2));
-
-
-    pin.release();
-    pin.sensor_release();
-    uint32_t timeout = 50; // Typical waiting time 20us-40us
-    assert(!wait_for_level(PinLevel::low, timeout, clock, pin)); // Timeout happens
-
-    pin.release();
-    pin.sensor_drive_low();
-    timeout = 50; // Typical waiting time 20us-40us
-    assert(wait_for_level(PinLevel::low, timeout, clock, pin)); //Timeout does not happen
-
-    MockClock clock3(pin, ComStage::comData);
-    PulseDurationResult durationsframe = read_pulse_durations_data(pin, clock3);
-    assert(durationsframe.timeout == false);
     DecodeResult result_decode = decode_frame(durationsframe.pulse_durations_us);
-    assert(result_decode.error == DecodeError::checksum_mismatch);
-    assert((result_decode.frame == Frame{255, 0, 255, 0, 255}));
 
-    // Testing the frame2data function (remember that the decimal parts go up to 9)
-    assert((frame2measurement(Frame{255, 9, 255, 9, 0}).RH == sensorOutput{255.9, 255.9}.RH));
-    assert((frame2measurement(Frame{255, 9, 255, 9, 0}).Temperature == sensorOutput{255.9, 255.9}.Temperature));
+    /*
+    if (verbose) {
+    Serial.println("Measured HIGH pulses:");
 
-    assert((frame2measurement(Frame{255, 8, 255, 9, 0}).RH != sensorOutput{255.9, 255.9}.RH));
-    assert((frame2measurement(Frame{5, 9, 5, 9, 0}).Temperature != sensorOutput{255.9, 255.9}.Temperature));
+    for (unsigned int i = 0;
+         i < durationsframe.pulse_durations_us.size(); ++i) {
+        const auto duration = durationsframe.pulse_durations_us[i];
 
-    assert((frame2measurement(Frame{29, 3, 4, 1, 0}).RH == sensorOutput{29.3, 4.1}.RH));
-    assert((frame2measurement(Frame{15, 7, 155, 2, 0}).Temperature == sensorOutput{15.7, 155.2}.Temperature));
+        const bool accepted =
+            (duration >= 23 && duration <= 28) ||
+            (duration >= 60 && duration < 80);
 
-    return 0;
+        Serial.print(i);
+        Serial.print(": ");
+        Serial.print(static_cast<unsigned int>(duration));
+        Serial.println(accepted ? " us" : " us <- rejected");
+    }
+       
+} */
+    
+
+    if (result_decode.error != DecodeError::none) {
+        if (result_decode.error == DecodeError::checksum_mismatch) {
+            if (verbose) Serial.println("Checksum missmatch");
+
+        } else {
+            if (verbose) Serial.println("Invalid pulse detected");
+        }
+        
+        return {0,0};
+    }
+
+
+    return frame2data(result_decode.frame);
+}
+
+ESP32ComPin pin = ESP32ComPin(5);
+ESP32Clock sensor_clock;
+
+void setup() {
+    Serial.begin(115200);
+    pin.release();
+    delay(2000);
+    
+
+
+
+
+}
+
+void loop() {
+    sensorOutput reading = get_sensor_reading(pin, sensor_clock, 1);
+    Serial.print("RH: ");
+    Serial.print(reading.RH);
+    Serial.print(", ");
+    Serial.print("T:");
+    Serial.println(reading.Temperature);
+    delay(2000);
+
 }
