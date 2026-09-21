@@ -13,7 +13,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: "week 1 mine/DHT11_sensor_driver"
+        working-directory: "DHT11_sensor_driver"
 
     steps:
       - name: Check out repository
