@@ -5,35 +5,6 @@
 // Board adapter -- to communicate on the 1-wire
 const int pin_number = 5;
 
-
-std::size_t edge_count{};
-
-
-
-portMUX_TYPE edge_mutex = portMUX_INITIALIZER_UNLOCKED;
-
-// ESP32 pin
-class ESP32ComPin : public ComPin {
-    public:
-        ESP32ComPin(const int pin) : pin_(pin) {}
-        void drive_low() override {
-            digitalWrite(pin_, LOW);
-            pinMode(pin_, OUTPUT);
-        }
-
-        void release() override {
-            pinMode(pin_, INPUT);
-        }
-
-        bool is_high() const override {
-            return digitalRead(pin_) == HIGH;
-        }
-    private:
-        const int pin_;
-
-};  
-
-// ESP32
 class ESP32Clock : public Clock {
     public:
     std::uint32_t now_us() const override {
@@ -63,22 +34,26 @@ class ESP32Clock : public Clock {
     gptimer_handle_t gptimer = NULL;
 
 };
-
-ESP32ComPin pin = ESP32ComPin(pin_number);
 ESP32Clock sensor_clock;
 
+portMUX_TYPE edge_mutex = portMUX_INITIALIZER_UNLOCKED;
+std::size_t edge_count{};
 
 namespace dht11 {
 void ARDUINO_ISR_ATTR onEdge()
 {
-    const auto now = sensor_clock.now_us();
+    const uint32_t now = sensor_clock.now_us();
     const bool high = digitalRead(pin_number) == HIGH;
 
     portENTER_CRITICAL_ISR(&edge_mutex);
 
     if (capturing) {
         if (edge_count < capacity) {
-            edges[edge_count++] = {now, high};
+            if (digitalRead(pin_number)) {
+                edges[edge_count++] = {now, high};
+            } else {
+                edges[edge_count++] = {now, low};
+            }
         } else {
             completeWrite = true;
             capturing = false;
@@ -88,41 +63,43 @@ void ARDUINO_ISR_ATTR onEdge()
 
     portEXIT_CRITICAL_ISR(&edge_mutex);
 }
+}
 
-void ARDUINO_ISR_ATTR offEdge()
-{
-    const auto now = sensor_clock.now_us();
-    const bool high = digitalRead(pin_number) == HIGH;
-
-    portENTER_CRITICAL_ISR(&edge_mutex);
-
-    if (capturing) {
-        if (edge_count < capacity) {
-            edges[edge_count++] = {now, low};
-        } else {
-            completeWrite = true;
-            capturing = false;
+// ESP32 pin
+class ESP32ComPin : public ComPin {
+    public:
+        ESP32ComPin(const int pin) : pin_(pin) {
+            attachInterrupt(digitalPinToInterrupt(pin), dht11::onEdge, CHANGE); // Attach an interrupt to the pin
         }
-    }
+        void drive_low() override {
+            digitalWrite(pin_, LOW);
+            pinMode(pin_, OUTPUT);
+        }
 
-    portEXIT_CRITICAL_ISR(&edge_mutex);
-}
-}
+        void release() override {
+            pinMode(pin_, INPUT);
+        }
+
+        bool is_high() const override {
+            return digitalRead(pin_) == HIGH;
+        }
+    private:
+        const int pin_;
+
+};  
+
+// ESP32
+
+ESP32ComPin pin = ESP32ComPin(pin_number);
+
+
 
 
 void setup() {
     Serial.begin(115200);
     sensor_clock.begin();
-    attachInterrupt(digitalPinToInterrupt(pin_number), dht11::onEdge, CHANGE);
-    //attachInterrupt(digitalPinToInterrupt(pin_number), dht11::offEdge, FALLING);
     pin.release();
     delay(2000);
-
-
-
-
-    
-
 
 
 

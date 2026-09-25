@@ -64,15 +64,11 @@ PulseDurationResult read_pulse_durations_data(ComPin & pin, Clock & clock) {
 PulseDurationResult read_pulse_durations_data() {
     if (completeWrite) {
         std::array<std::uint8_t, 40> pulse_durations_us{};
-        std::uint8_t duration{};
         unsigned int j{};
         for (unsigned int i{}; i < 80-1; i++) {
-            duration = static_cast<std::uint8_t>(edges[i+1].timestamp_us - edges[i].timestamp_us);
-            if (!(duration > 45 && duration < 69)) { // Just capture the width of the pulses that encode the data
-                
-                            pulse_durations_us[j] = static_cast<std::uint8_t>(edges[i+1].timestamp_us - edges[i].timestamp_us);
-                            j++;
-                
+            if ((!edges[i+1].high && edges[i].high)) { // Just capture the width of the pulses that encode the data     
+                pulse_durations_us[j] = static_cast<std::uint8_t>(edges[i+1].timestamp_us - edges[i].timestamp_us);
+                j++;
             }
         }
 
@@ -139,7 +135,6 @@ ReadError request_sensor_reading(ComPin & pin, Clock & clock) {
     if (!com_begin(pin, clock)) {
         return ReadError::handshake_timeout;
     }
-
     capturing = true;
     return ReadError::none;
 }
