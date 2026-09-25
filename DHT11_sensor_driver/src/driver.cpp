@@ -1,6 +1,13 @@
 #include "DHT11/driver.h"
+//#include "Arduino.h"
+
 
 namespace dht11 {
+
+bool completeWrite{};
+Edge edges[capacity]{};
+bool capturing{};
+
 bool elapsed_at_least(std::uint32_t now,
                                 std::uint32_t start,
                                 std::uint32_t interval_us) noexcept {
@@ -54,6 +61,31 @@ PulseDurationResult read_pulse_durations_data(ComPin & pin, Clock & clock) {
     
 }
 
+PulseDurationResult read_pulse_durations_data() {
+    if (completeWrite) {
+        std::array<std::uint8_t, 40> pulse_durations_us{};
+        std::uint8_t duration{};
+        unsigned int j{};
+        for (unsigned int i{}; i < 80-1; i++) {
+            duration = static_cast<std::uint8_t>(edges[i+1].timestamp_us - edges[i].timestamp_us);
+            if (!(duration > 45 && duration < 69)) { // Just capture the width of the pulses that encode the data
+                
+                            pulse_durations_us[j] = static_cast<std::uint8_t>(edges[i+1].timestamp_us - edges[i].timestamp_us);
+                            j++;
+                
+            }
+        }
+
+        return {false, pulse_durations_us};
+
+        
+
+    }
+    return {true, {}}; // The timeout is meaningless here now (Change it)
+}
+
+
+
 // Function to get data ------------------------------------------------------
 ReadResult get_sensor_reading(ComPin & pin, Clock & clock) {
 
@@ -61,7 +93,7 @@ ReadResult get_sensor_reading(ComPin & pin, Clock & clock) {
         return {{}, ReadError::handshake_timeout};
     }
 
-    PulseDurationResult durationsframe = read_pulse_durations_data(pin, clock);
+    PulseDurationResult durationsframe = read_pulse_durations_data();
 
     if (durationsframe.timeout) {
         return {{}, ReadError::data_timeout};
@@ -70,7 +102,6 @@ ReadResult get_sensor_reading(ComPin & pin, Clock & clock) {
     DecodeResult result_decode = decode_frame(durationsframe.pulse_durations_us);
 
     /*
-    if (verbose) {
     Serial.println("Measured HIGH pulses:");
 
     for (unsigned int i = 0;
@@ -86,8 +117,8 @@ ReadResult get_sensor_reading(ComPin & pin, Clock & clock) {
         Serial.print(static_cast<unsigned int>(duration));
         Serial.println(accepted ? " us" : " us <- rejected");
     }
+        */
        
-} */
     
 
     if (result_decode.error != DecodeError::none) {
@@ -98,6 +129,60 @@ ReadResult get_sensor_reading(ComPin & pin, Clock & clock) {
             return {{}, ReadError::invalid_pulse};
         }
     }
+
+
+    return {frame2data(result_decode.frame), ReadError::none};
+}
+
+ReadError request_sensor_reading(ComPin & pin, Clock & clock) {
+
+    if (!com_begin(pin, clock)) {
+        return ReadError::handshake_timeout;
+    }
+
+    capturing = true;
+    return ReadError::none;
+}
+
+ReadResult read_sensor_reading() {
+    PulseDurationResult durationsframe = read_pulse_durations_data();
+
+    if (durationsframe.timeout) {
+        return {{}, ReadError::data_timeout};
+    }
+
+    DecodeResult result_decode = decode_frame(durationsframe.pulse_durations_us);
+
+    /*
+    Serial.println("Measured HIGH pulses:");
+
+    for (unsigned int i = 0;
+         i < durationsframe.pulse_durations_us.size(); ++i) {
+        const auto duration = durationsframe.pulse_durations_us[i];
+
+        const bool accepted =
+            (duration >= 23 && duration <= 28) ||
+            (duration >= 60 && duration < 80);
+
+        Serial.print(i);
+        Serial.print(": ");
+        Serial.print(static_cast<unsigned int>(duration));
+        Serial.println(accepted ? " us" : " us <- rejected");
+    }
+        */
+       
+    
+
+    if (result_decode.error != DecodeError::none) {
+        if (result_decode.error == DecodeError::checksum_mismatch) {
+            return {{}, ReadError::checksum_mismatch};
+
+        } else {
+            return {{}, ReadError::invalid_pulse};
+        }
+    }
+
+    completeWrite = false;
 
 
     return {frame2data(result_decode.frame), ReadError::none};

@@ -2,6 +2,7 @@
 #include <cstdint>
 
 
+
 // Board adapter -- to communicate on the 1-wire
 
 class ComPin {
@@ -29,3 +30,4 @@ struct Clock {
     virtual std::uint32_t now_us() const = 0;
     virtual void delay_us(std::uint32_t duration) const = 0;
 };
+

@@ -26,6 +26,9 @@ struct PulseDurationResult {
 };
 
 PulseDurationResult read_pulse_durations_data(ComPin & pin, Clock & clock);
+PulseDurationResult read_pulse_durations_data(); // This one uses interrupts and HW timers
+
+
 
 enum class ReadError {
     none,
@@ -35,11 +38,27 @@ enum class ReadError {
     checksum_mismatch
 };
 
+
 struct ReadResult {
     sensorOutput measurement{};
     ReadError error{ReadError::none};
 };
 
+ReadError request_sensor_reading(ComPin & pin, Clock & clock);
+ReadResult read_sensor_reading();
+
 // Function to get data ------------------------------------------------------
 ReadResult get_sensor_reading(ComPin & pin, Clock & clock);
+
+// Releted to the Interrupt capture ------------------------------------------
+extern bool completeWrite;
+struct Edge {
+    std::uint32_t timestamp_us;
+    bool high;
+};
+
+constexpr std::size_t capacity = 80;
+extern Edge edges[capacity];
+extern bool capturing;
 }
+
